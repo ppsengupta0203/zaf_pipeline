@@ -7,7 +7,6 @@ input:
     batch_size: 1
     auto_replay_nacks: true
 output:
-  label: output-1
+  label: stdout-1
   stdout:
     codec: lines
-  
