@@ -1,0 +1,269 @@
+http:
+  enabled: true
+  address: 0.0.0.0:4195
+input:
+  label: azure_reader
+  azure_blob_storage:
+    storage_connection_string: ${azure_storage_connection_string}
+    container: 'canvas'
+    prefix: 'batch-processing/incoming/'
+    scanner:
+      to_the_end: {}
+    delete_objects: true
+  processors:
+    - label: extract_source_metadata
+      mapping: |
+        meta source_file = @blob_storage_key
+        meta source_filename = if @blob_storage_key != null { @blob_storage_key.re_find_all("[^/]+$").index(0) } else { "unknown.parquet" }
+    - label: decode_parquet
+      parquet_decode: {}
+    - label: split_records
+      split: {}
+buffer:
+  label: aaa
+  memory:
+    limit: 5.24288e+08
+    batch_policy:
+      enabled: false
+      count: 0
+      byte_size: 0
+      period: ""
+      check: ""
+pipeline:
+  processors:
+    # ═══════════════════════════════════════════════════════════════════════════
+    # STEP 1: VALIDATION
+    # ═══════════════════════════════════════════════════════════════════════════
+    - label: validate_records
+      mapping: |
+        root = this
+        root.is_valid = this.customer_id != null && this.name != null && this.balance != null && this.email != null
+        root.validation_errors = if !root.is_valid { "missing required fields" }
+    # ═══════════════════════════════════════════════════════════════════════════
+    # STEP 2: ENRICHMENT
+    # ═══════════════════════════════════════════════════════════════════════════
+    - label: enrich_records
+      mapping: |
+        root = this
+        let bal = this.balance.or(0)
+        root.risk_score = if $bal > 100000 { 10 } else if $bal > 50000 { 30 } else if $bal > 10000 { 50 } else { 70 }
+        root.customer_tier = if this.segment == "PRIVATE" || $bal > 500000 { "PLATINUM" } else if this.segment == "PREMIUM" || $bal > 100000 { "GOLD" } else if $bal > 25000 { "SILVER" } else { "BRONZE" }
+        root.processed_at = now()
+    # ═══════════════════════════════════════════════════════════════════════════
+    # STEP 3: DELTA DETECTION
+    # ═══════════════════════════════════════════════════════════════════════════
+    - label: compute_row_hash
+      mapping: |
+        meta customer_key = this.customer_id.string()
+        let hash_data = this.customer_id.string() + "|" + this.name.string() + "|" + this.balance.or(0).string() + "|" + this.status.string()
+        meta row_hash = $hash_data.hash("xxhash64").encode("hex")
+    - label: check_delta_cache
+      branch:
+        request_map: root = meta("customer_key")
+        processors:
+          - label: d_delta_cache
+            cache:
+              resource: delta_cache
+              operator: get
+              key: ${! content() }
+        result_map: meta old_hash = if errored() { "" } else { content().string() }
+    - label: classify_change_type
+      mapping: |
+        let old = meta("old_hash")
+        let new = meta("row_hash")
+        meta is_update = $old != "" && $new != $old
+        meta is_new = $old == ""
+        meta is_unchanged = $new == $old && $old != ""
+    - label: filter_unchanged
+      mapping: |
+        root = if meta("is_unchanged") == true { deleted() } else { this }
+    - label: update_delta_cache
+      cache:
+        resource: delta_cache
+        operator: set
+        key: ${! meta("customer_key") }
+        value: ${! meta("row_hash") }
+    - label: log_processed_record
+      log:
+        level: INFO
+        message: 'PROCESSED: customer=${! this.customer_id } tier=${! this.customer_tier } valid=${! this.is_valid } action=${! if meta("is_new") == true { "INSERT" } else { "UPDATE" } }'
+output:
+  label: output_broker
+  broker:
+    pattern: fan_out
+    outputs:
+      # ═══════════════════════════════════════════════════════════════════════════
+      # OUTPUT 1: Write to PostgreSQL based on validity
+      # ═══════════════════════════════════════════════════════════════════════════
+      - label: postgres_writer
+        switch:
+          cases:
+            # Invalid records → invalid_records table (DLQ)
+            - check: this.is_valid == false
+              output:
+                label: postgres_invalid
+                sql_insert:
+                  driver: postgres
+                  dsn: ${RULES_DB_CONNECTION_STRING}
+                  table: ${DB_SCHEMA:batch_demo}.invalid_records
+                  columns:
+                    - customer_id
+                    - name
+                    - email
+                    - segment
+                    - balance
+                    - currency
+                    - status
+                    - validation_errors
+                    - batch_id
+                    - raw_data
+                  args_mapping: |
+                    root = [
+                      this.customer_id,
+                      this.name,
+                      this.email,
+                      this.segment,
+                      this.balance,
+                      this.currency,
+                      this.status,
+                      this.validation_errors,
+                      this.batch_id,
+                      this.format_json()
+                    ]
+            # Valid records → customers table (upsert)
+            - output:
+                label: postgres_customers
+                sql_raw:
+                  driver: postgres
+                  dsn: ${RULES_DB_CONNECTION_STRING}
+                  query: |
+                    INSERT INTO ${DB_SCHEMA:batch_demo}.customers (
+                      customer_id, name, email, segment, balance, currency, status,
+                      last_transaction_date, risk_score, customer_tier, batch_id, processed_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    ON CONFLICT (customer_id) DO UPDATE SET
+                      name = EXCLUDED.name,
+                      email = EXCLUDED.email,
+                      segment = EXCLUDED.segment,
+                      balance = EXCLUDED.balance,
+                      currency = EXCLUDED.currency,
+                      status = EXCLUDED.status,
+                      last_transaction_date = EXCLUDED.last_transaction_date,
+                      risk_score = EXCLUDED.risk_score,
+                      customer_tier = EXCLUDED.customer_tier,
+                      batch_id = EXCLUDED.batch_id,
+                      processed_at = EXCLUDED.processed_at
+                  args_mapping: |
+                    root = [
+                      this.customer_id,
+                      this.name,
+                      this.email,
+                      this.segment,
+                      this.balance,
+                      this.currency,
+                      this.status,
+                      this.last_transaction_date,
+                      this.risk_score,
+                      this.customer_tier,
+                      this.batch_id,
+                      this.processed_at
+                    ]
+      # ═══════════════════════════════════════════════════════════════════════════
+      # OUTPUT 2: Write to audit log
+      # ═══════════════════════════════════════════════════════════════════════════
+      - label: postgres_audit
+        sql_insert:
+          driver: postgres
+          dsn: ${RULES_DB_CONNECTION_STRING}
+          table: ${DB_SCHEMA:batch_demo}.customer_audit_log
+          columns:
+            - customer_id
+            - action
+            - new_values
+            - batch_id
+          args_mapping: |
+            let action = if !this.is_valid { "INVALID" } else if meta("is_new") == true { "INSERT" } else { "UPDATE" }
+            root = [
+              this.customer_id,
+              $action,
+              this.format_json(),
+              this.batch_id
+            ]
+      # ═══════════════════════════════════════════════════════════════════════════
+      # OUTPUT 3: Write to Azure Blob (backup/debugging)
+      # ═══════════════════════════════════════════════════════════════════════════
+      - label: azure_blob_backup
+        switch:
+          cases:
+            # Invalid records
+            - check: this.is_valid == false
+              output:
+                label: blob_failed_records
+                azure_blob_storage:
+                  storage_connection_string: ${azure_storage_connection_string}
+                  container: 'canvas'
+                  path: batch-processing/failed/invalid_records_${!timestamp_unix()}.jsonl
+            # Priority customers (PLATINUM/GOLD)
+            - check: this.customer_tier == "PLATINUM" || this.customer_tier == "GOLD"
+              output:
+                label: blob_priority_customers
+                azure_blob_storage:
+                  storage_connection_string: ${azure_storage_connection_string}
+                  container: 'canvas'
+                  path: batch-processing/output/priority_customers_${!timestamp_unix()}.jsonl
+            # Standard customers
+            - output:
+                label: blob_standard_customers
+                azure_blob_storage:
+                  storage_connection_string: ${azure_storage_connection_string}
+                  container: 'canvas'
+                  path: batch-processing/output/standard_customers_${!timestamp_unix()}.jsonl
+      # ═══════════════════════════════════════════════════════════════════════════
+      # OUTPUT 4: Archive processed file - Write completion marker to Azure
+      # This writes a marker file to completed/ prefix so we know the file was
+      # successfully processed. The marker contains metadata about the processing.
+      # ═══════════════════════════════════════════════════════════════════════════
+      - label: archive_completion_marker
+        azure_blob_storage:
+          storage_connection_string: ${azure_storage_connection_string}
+          container: 'canvas'
+          path: 'batch-processing/completed/${! meta("source_filename").or("unknown") }_${!timestamp_unix()}.done.json'
+        processors:
+          - label: filter_empty_source
+            switch:
+              - check: meta("source_file").or("") == ""
+                processors:
+                  - label: delete_root
+                    mapping: root = deleted()
+          - label: extract_source_file
+            mapping: root = meta("source_file")
+          - label: dedupe_file_tracker
+            dedupe:
+              cache: file_tracker
+              key: ${! content() }
+          - label: build_completion_marker
+            mapping: |
+              let src = meta("source_file").or("unknown")
+              let filename = meta("source_filename").or("unknown")
+              root = {
+                "status": "completed",
+                "original_file": $src,
+                "filename": $filename,
+                "completed_at": now(),
+                "records_in_batch": "processed"
+              }
+          - label: log_file_completed
+            log:
+              level: INFO
+              message: 'File completed: ${! meta("source_file") } -> completed/${! meta("source_filename") }.done.json'
+cache_resources:
+  - label: delta_cache
+    file:
+      directory: ./cache
+  - label: file_tracker
+    memory:
+      default_ttl: 1h
+      init_values: {}
+logger:
+  level: INFO
+  format: logfmt
