@@ -1,7 +1,16 @@
 input:
   label: generate-1
   generate:
-    mapping: root = {}
+    mapping: |
+      root = {
+        "counter": timestamp_unix_nano(),
+        "data": {
+          "status": "running",
+          "value": random_int()
+        },
+        "deployment_id": "dep-test-12345",
+        "message": "Test message from pipeline"
+      }
     interval: 1s
     count: 0
     batch_size: 1
