@@ -1,0 +1,52 @@
+input:
+  label: client_customer_event-1
+  client_customer_event:
+    mapping: |
+      root = {
+        "metadata":{
+          "message_key": uuid_v4(),
+          "created_date": fake("unix_time"),
+          "updated_date": fake("unix_time"),
+          "outbox_published_date": fake("unix_time"),
+          "event_type": ["UPDATE", "CREATE", "DELETE"].index(random_int() % 3),
+          "event_type_key_name": "party_key",
+          "event_metadata_version": "1.0.0"
+        },
+        "business_data_payload":{
+          "tenant_key": uuid_v4(),
+          "party_key": uuid_v4(),
+          "system_of_origin": ["EXTERNAL", "INTERNAL"].index(random_int() % 2),
+          "name_prefix": fake("title_female"),
+          "preferred_name": fake("first_name"),
+          "given_name": fake("first_name"),
+          "last_name": fake("last_name"),
+          "middle_name": fake("first_name"),
+          "date_of_birth": fake("date"),
+          "date_of_death": [fake("date"), null].index(random_int() % 2),
+          "gender": ["FEMALE", "MALE", "OTHER"].index(random_int() % 2),
+          "place_of_birth": ["Toronto", "Montréal", "Vancouver", "Calgary", "Edmonton", "Ottawa-Gatineau", "Québec City", "Winnipeg, Manitoba"].index(random_int() % 8),
+          "country_of_residence": ["AUS", "CAN", "USA", "GBR"].index(random_int() % 4),
+          "login_on_register": [true, false].index(random_int() % 2),
+          "created_date": fake("unix_time"),
+          "updated_date": fake("unix_time"),
+          "status": ["PROVISIONED", "UPDATED", "DELETED"].index(random_int() % 3),
+          "citizenship":{
+            "nationalities": ["AUS", "CAN", "USA", "GBR"].index(random_int() % 4),
+            "created_date": fake("unix_time"),
+            "updated_date": fake("unix_time"),
+          },
+          "attributes":[],
+          "customer_marker":[],
+          "national_identity_numbers":[
+            {
+              "country_code": ["AU", "CA", "US", "GB"].index(random_int() % 4),
+              "number": uuid_v4(),
+              "created_date": fake("unix_time"),
+              "updated_date": fake("unix_time"),
+            }
+          ],
+          "purpose_of_business_relationship": null,
+          "attributtes": null
+        }
+      }
+    count: 10
