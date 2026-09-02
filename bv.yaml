@@ -1,0 +1,21 @@
+output:
+  label: adobe_workfront_api_output-1
+  adobe_workfront_api_output:
+    api: workfront_approval_recall
+    workfront_url: mn
+    client_id: ""
+    client_secret: ""
+    object_type: project
+    object_id: ""
+    stage_id: ""
+    approval_process_id: ""
+    default_assignee_id: ""
+    mapping: |
+      root = {
+        "name": this.name.or("Zafin Request - " + uuid_v4()),
+        "description": this.description.or("Request submitted from Zafin"),
+        "priority": this.priority.or(2),
+        "zafinRequestId": this.zafinRequestId.or(""),
+        "zafinRequestType": this.zafinRequestType.or(""),
+        "zafinRequestData": this
+      }
