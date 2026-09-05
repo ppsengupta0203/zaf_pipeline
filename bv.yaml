@@ -1,3 +1,15 @@
+input:
+  label: adobe_workfront_api_input-1
+  adobe_workfront_api_input:
+    api: workfront_approval_processes
+    workfront_url: h
+    client_id: ""
+    client_secret: ""
+    polling_interval: 30s
+    object_id: ""
+    object_code: ""
+    search_criteria: ""
+    fields: ID,name,status
 output:
   label: adobe_workfront_api_output-1
   adobe_workfront_api_output:
